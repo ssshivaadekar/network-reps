@@ -97,6 +97,8 @@ export default function App() {
   const [gymPick, setGymPick] = useState(null);
   const [dismissed, setDismissed] = useState([]);
   const [ctSearch, setCtSearch] = useState("");
+  const [lastSync, setLastSync] = useState(null);
+  const [syncResult, setSyncResult] = useState(null);
   const fRef = useRef(null);
 
   const NOW = getToday();
@@ -107,8 +109,8 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [l, c, g] = await Promise.all([db.getActivityLog(), db.getContacts(), db.getSettings()]);
-        setLog(l); setCts(c); setGoal(g);
+        const [l, c, g, ls] = await Promise.all([db.getActivityLog(), db.getContacts(), db.getSettings(), db.getLastSync()]);
+        setLog(l); setCts(c); setGoal(g); setLastSync(ls);
       } catch(e) { console.warn("Load:", e); }
       setLoaded(true);
     })();
@@ -286,6 +288,11 @@ export default function App() {
 
           const buildEntry = (nm, co, pos, em, cn) => {
             const existing = contacts.find(c => c.name.toLowerCase()===nm.toLowerCase());
+            const changedFields = [];
+            if (existing) {
+              if (pos && pos !== (existing.position||"")) changedFields.push({field:"position", old:existing.position||"(none)", new:pos});
+              if (co && co !== (existing.company||"")) changedFields.push({field:"company", old:existing.company||"(none)", new:co});
+            }
             return {
               id: existing ? existing.id : uid(),
               name: nm, company: co, position: pos, email: em, connectedOn: cn,
@@ -294,6 +301,8 @@ export default function App() {
               seniority: existing?.seniority || inferSen(pos),
               exists: !!existing,
               existingData: existing || null,
+              changedFields,
+              hasChanges: changedFields.length > 0,
             };
           };
 
@@ -317,10 +326,14 @@ export default function App() {
           }
 
           if(parsed.length===0){notify("0 contacts found");return;}
+          const hasAnyChanges = parsed.some(p => p.exists && p.hasChanges);
           setImpPrev(parsed);
-          // By default select new contacts only
-          setImpSel(new Set(parsed.filter(p => !p.exists).slice(0,50).map(p => p.id)));
-          setImpSync(false);
+          setImpSync(hasAnyChanges);
+          // Auto-select new contacts + changed contacts
+          setImpSel(new Set(
+            parsed.filter(p => !p.exists || (hasAnyChanges && p.hasChanges)).slice(0,100).map(p => p.id)
+          ));
+          setSyncResult(null);
           setShowIM(true);
         },
         error() { notify("Error reading CSV"); },
@@ -357,6 +370,20 @@ export default function App() {
       return [...next, ...newContacts];
     });
     setShowIM(false); setImpPrev([]); setImpSel(new Set());
+
+    // Record sync timestamp
+    const syncTs = new Date().toISOString();
+    setLastSync(syncTs);
+    db.setLastSync(syncTs).catch(()=>{});
+
+    // Build changes summary for the People tab
+    const changesDetail = updatedContacts.map(upd => {
+      const src = impPrev.find(p => p.id === upd.id);
+      return src?.changedFields?.length > 0 ? { name: upd.name, fields: src.changedFields } : null;
+    }).filter(Boolean);
+    if(newContacts.length > 0 || updatedContacts.length > 0) {
+      setSyncResult({ added: newContacts.length, updated: updatedContacts.length, changesDetail });
+    }
 
     const parts = [];
     if(newContacts.length > 0) parts.push("Added "+newContacts.length);
@@ -651,13 +678,47 @@ export default function App() {
               </div>
             </div>
 
-            {/* LinkedIn import hint */}
-            <div style={{padding:"10px 14px",background:"#EFF6FF",borderRadius:14,display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:16}}>💡</span>
-              <div style={{fontSize:12,color:"#2563EB",fontWeight:500,lineHeight:1.4}}>
-                Export from LinkedIn: <strong>Settings → Data Privacy → Get a copy → Connections</strong>
+            {/* LinkedIn sync status */}
+            <div style={{padding:"10px 14px",background:"#EFF6FF",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:16}}>💡</span>
+                <div style={{fontSize:12,color:"#2563EB",fontWeight:500,lineHeight:1.4}}>
+                  Export from LinkedIn: <strong>Settings → Data Privacy → Get a copy → Connections</strong>
+                </div>
               </div>
+              {lastSync && (
+                <div style={{fontSize:11,color:"#6B7280",fontWeight:500,whiteSpace:"nowrap",flexShrink:0}}>
+                  Synced {fmtDate(lastSync.split("T")[0])}
+                </div>
+              )}
             </div>
+
+            {/* Post-sync changes summary */}
+            {syncResult && (
+              <div style={{background:"#EFF6FF",borderRadius:16,padding:"14px 16px",border:"1.5px solid #BFDBFE"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:syncResult.changesDetail.length>0?10:0}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#1D4ED8"}}>
+                    LinkedIn sync complete
+                    {syncResult.added>0 && <span style={{marginLeft:8,fontWeight:500,color:"#059669"}}>+{syncResult.added} new</span>}
+                    {syncResult.updated>0 && <span style={{marginLeft:8,fontWeight:500,color:"#D97706"}}>{syncResult.updated} updated</span>}
+                  </div>
+                  <button onClick={() => setSyncResult(null)} style={{background:"none",border:"none",color:"#9CA3AF",fontSize:16,cursor:"pointer",padding:"0 4px",fontFamily:F}}>✕</button>
+                </div>
+                {syncResult.changesDetail.map((c,i) => (
+                  <div key={i} style={{padding:"8px 10px",background:"#fff",borderRadius:10,marginBottom:4,border:"1px solid #DBEAFE"}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:4}}>{c.name}</div>
+                    {c.fields.map((f,j) => (
+                      <div key={j} style={{fontSize:12,color:"#6B7280",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:2}}>
+                        <span style={{fontWeight:600,color:"#374151",textTransform:"capitalize"}}>{f.field}</span>
+                        <span style={{textDecoration:"line-through",color:"#D1D5DB"}}>{f.old}</span>
+                        <span style={{color:"#6B7280"}}>→</span>
+                        <span style={{color:"#1D4ED8",fontWeight:600}}>{f.new}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Search */}
             {contacts.length > 0 && (
@@ -850,8 +911,15 @@ export default function App() {
           <div style={{background:"#fff",borderRadius:24,padding:24,width:"100%",maxWidth:460,maxHeight:"85vh",display:"flex",flexDirection:"column",border:"1.5px solid #F3F4F6",boxShadow:"0 20px 60px rgba(0,0,0,.12)",animation:"si .25s ease"}} onClick={e => e.stopPropagation()}>
             <h3 style={{fontSize:20,fontWeight:800}}>Sync LinkedIn Contacts</h3>
             <p style={{fontSize:13,color:"#9CA3AF",marginTop:3,marginBottom:12,fontWeight:500}}>
-              {impPrev.filter(p => !p.exists).length} new · {impPrev.filter(p => p.exists).length} existing
+              {impPrev.filter(p => !p.exists).length} new · {impPrev.filter(p => p.exists && p.hasChanges).length} changed · {impPrev.filter(p => p.exists && !p.hasChanges).length} unchanged
             </p>
+
+            {/* Changes detected banner */}
+            {impPrev.some(p => p.hasChanges) && (
+              <div style={{padding:"10px 14px",background:"#FFFBEB",borderRadius:12,marginBottom:10,border:"1.5px solid #FEF3C7",fontSize:13,color:"#92400E",fontWeight:500}}>
+                🔄 <strong>{impPrev.filter(p=>p.hasChanges).length} contacts</strong> have updated job info on LinkedIn
+              </div>
+            )}
 
             {/* Sync mode toggle */}
             {impPrev.some(p => p.exists) && (
@@ -895,11 +963,23 @@ export default function App() {
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:14,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                       {p.name}
-                      {p.exists && <span style={{marginLeft:6,fontSize:11,padding:"1px 6px",borderRadius:6,background:impSync?"#DBEAFE":"#F3F4F6",color:impSync?"#2563EB":"#9CA3AF",fontWeight:600}}>{impSync?"sync":"exists"}</span>}
+                      {p.exists && p.hasChanges && <span style={{marginLeft:6,fontSize:11,padding:"1px 6px",borderRadius:6,background:"#FEF3C7",color:"#92400E",fontWeight:700}}>changed</span>}
+                      {p.exists && !p.hasChanges && <span style={{marginLeft:6,fontSize:11,padding:"1px 6px",borderRadius:6,background:impSync?"#DBEAFE":"#F3F4F6",color:impSync?"#2563EB":"#9CA3AF",fontWeight:600}}>{impSync?"sync":"exists"}</span>}
                     </div>
-                    <div style={{fontSize:12,color:"#9CA3AF",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>
-                      {p.position}{p.position&&p.company?" · ":""}{p.company}
-                    </div>
+                    {/* Diff view for changed contacts */}
+                    {p.hasChanges && impSync
+                      ? p.changedFields.map((cf,j) => (
+                          <div key={j} style={{fontSize:11,color:"#6B7280",marginTop:2,display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+                            <span style={{fontWeight:600,color:"#374151",textTransform:"capitalize"}}>{cf.field}:</span>
+                            <span style={{textDecoration:"line-through",color:"#D1D5DB"}}>{cf.old}</span>
+                            <span>→</span>
+                            <span style={{color:"#1D4ED8",fontWeight:600}}>{cf.new}</span>
+                          </div>
+                        ))
+                      : <div style={{fontSize:12,color:"#9CA3AF",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>
+                          {p.position}{p.position&&p.company?" · ":""}{p.company}
+                        </div>
+                    }
                   </div>
                 </div>;
               })}

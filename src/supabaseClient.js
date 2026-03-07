@@ -141,5 +141,29 @@ export const db = {
       return
     }
     localStorage.setItem('net_weekly_goal', JSON.stringify(weeklyGoal))
+  },
+
+  async getLastSync() {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('settings')
+        .select('*')
+        .eq('key', 'last_linkedin_sync')
+        .single()
+      if (error && error.code !== 'PGRST116') throw error
+      return data?.value ? JSON.parse(data.value) : null
+    }
+    return JSON.parse(localStorage.getItem('net_last_linkedin_sync') || 'null')
+  },
+
+  async setLastSync(isoTimestamp) {
+    if (supabase) {
+      const { error } = await supabase
+        .from('settings')
+        .upsert({ key: 'last_linkedin_sync', value: JSON.stringify(isoTimestamp) })
+      if (error) throw error
+      return
+    }
+    localStorage.setItem('net_last_linkedin_sync', JSON.stringify(isoTimestamp))
   }
 }
